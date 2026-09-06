@@ -56,95 +56,103 @@ def parse_calorie(cal_str):
 def clean_menu_text(menu_str):
     """메뉴 텍스트의 알레르기 원산지 번호 표기를 제거하고 정돈합니다."""
     if not menu_str:
-        return "메뉴 정보 없음"
-    # <br/> 태그 정제 및 알레르기 안내 숫자 제거
+        return "-"
     cleaned = menu_str.replace("<br/>", ", ")
     cleaned = re.sub(r"\d+\.", "", cleaned)
-    # 연속된 공백 및 쉼표 정돈
     cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
     return cleaned.strip(", ")
 
-
 # --- 메인 화면 레이아웃 ---
 st.title("🥗 고교 급식 메뉴 & 칼로리 순위")
-st.write("날짜를 선택하면 성남고, 당곡고, 수도여고의 메뉴와 칼로리를 자동으로 비교하여 **칼로리가 높은 순**으로 보여줍니다.")
+st.write("날짜를 선택하면 성남고, 당곡고, 수도여고의 메뉴와 칼로리를 **칼로리가 높은 순**으로 비교합니다.")
 
-# 날짜 선택기 (기본값: 오늘)
+# 날짜 선택기 (주말, 휴일 등 모든 날짜 선택 가능)
 selected_date = st.date_input("📅 날짜 선택", datetime.now())
 date_str_formatted = selected_date.strftime("%Y%m%d")
 
-# API Key 입력 (필요 시 사이드바에서 수정 가능)
+# 사이드바 설정
 with st.sidebar:
     st.header("⚙️ 설정")
     api_key = st.text_input("NEIS API Key (선택)", value="sample")
-    st.caption("※ 기본 sample 키로도 작동하지만, 안정적인 요청을 위해 정식 키 사용을 권장합니다.")
+    st.caption("※ 기본 sample 키 사용 시 요청 제한이 발생할 수 있습니다.")
 
-# --- 데이터 수집 및 파싱 ---
+# --- 데이터 수집 ---
 all_meals = []
+school_meal_status = {}  # 학교별 급식 유무 상태 저장
 
 with st.spinner("급식 정보를 조회하고 있습니다..."):
     for school_name, school_code in SCHOOLS.items():
         rows = fetch_meal_data(school_code, date_str_formatted, api_key)
         
-        for row in rows:
-            cal_num = parse_calorie(row.get("CAL_INFO", ""))
-            meal_type = row.get("MMEAL_SC_NM", "식사")
-            menu = clean_menu_text(row.get("DDISH_NM", ""))
-            
-            all_meals.append({
-                "학교명": school_name,
-                "식사 구분": meal_type,
-                "칼로리(kcal)": cal_num,
-                "메뉴 요약": menu,
-                "영양 정보": clean_menu_text(row.get("NTR_INFO", ""))
-            })
+        if rows:
+            school_meal_status[school_name] = True
+            for row in rows:
+                cal_num = parse_calorie(row.get("CAL_INFO", ""))
+                meal_type = row.get("MMEAL_SC_NM", "식사")
+                menu = clean_menu_text(row.get("DDISH_NM", ""))
+                
+                all_meals.append({
+                    "학교명": school_name,
+                    "식사 구분": meal_type,
+                    "칼로리(kcal)": cal_num,
+                    "메뉴 요약": menu
+                })
+        else:
+            school_meal_status[school_name] = False
 
-# --- 결과 출력 ---
 st.markdown("---")
 
+# --- 결과 출력 ---
+# 1. 3개 학교 모두 급식이 없는 경우
 if not all_meals:
-    st.info(f"💡 **{selected_date.strftime('%Y년 %m월 %d일')}**은 급식 정보가 없거나 주말/휴일입니다.")
+    st.warning(
+        f"🚨 **{selected_date.strftime('%Y년 %m월 %d일')}**은 대상 학교(성남고, 당곡고, 수도여고) 모두 **급식이 없는 날**입니다. "
+        f"(주말, 공휴일, 재량휴업일, 방학 등)"
+    )
+
+# 2. 일부 또는 전체 학교에 급식이 있는 경우
 else:
-    # 칼로리 내림차순 정렬 (높은 순 -> 낮은 순)
     df = pd.DataFrame(all_meals)
     df_sorted = df.sort_values(by="칼로리(kcal)", ascending=False).reset_index(drop=True)
 
-    # 1. 최고 칼로리 강조 카드
+    # 최고 칼로리 급식 강조
     max_meal = df_sorted.iloc[0]
-    st.subheader("🔥 오늘 가장 칼로리가 높은 급식")
-    
+    st.subheader("🔥 선택일 최고 칼로리 급식")
     st.warning(
         f"**1위: {max_meal['학교명']} ({max_meal['식사 구분']})** — **{max_meal['칼로리(kcal)']} kcal**\n\n"
         f"🍱 **메뉴**: {max_meal['메뉴 요약']}"
     )
 
-    # 2. 전체 칼로리 순위 목록
-    st.subheader(f"📊 칼로리 순위 목록 (높은 순)")
+    # 전체 순위 테이블
+    st.subheader("📊 칼로리 순위 목록 (높은 순)")
+    df_display = df_sorted.copy()
+    df_display.index = df_display.index + 1
+    df_display.index.name = "순위"
     
-    # 순위 컬럼 추가
-    df_sorted.index = df_sorted.index + 1
-    df_sorted.index.name = "순위"
-
-    # 칼로리 높은 순 테이블 표시
     st.dataframe(
-        df_sorted[["학교명", "식사 구분", "칼로리(kcal)", "메뉴 요약"]],
+        df_display[["학교명", "식사 구분", "칼로리(kcal)", "메뉴 요약"]],
         use_container_width=True
     )
 
-    # 3. 학교별 메뉴 세부 보기
-    st.subheader("📋 학교별 세부 메뉴")
-    cols = st.columns(len(SCHOOLS))
-    
-    for idx, (school_name, _) in enumerate(SCHOOLS.items()):
-        school_data = df[df["학교명"] == school_name]
-        with cols[idx]:
-            st.markdown(f"### {school_name}")
-            if school_data.empty:
-                st.write("급식 없음")
-            else:
-                for _, row in school_data.iterrows():
-                    st.metric(
-                        label=f"{row['식사 구분']}",
-                        value=f"{row['칼로리(kcal)']} kcal"
-                    )
-                    st.caption(row["메뉴 요약"])
+st.markdown("---")
+
+# 3. 학교별 상태 및 상세 메뉴 카드
+st.subheader("📋 학교별 급식 현황")
+cols = st.columns(len(SCHOOLS))
+
+for idx, (school_name, _) in enumerate(SCHOOLS.items()):
+    with cols[idx]:
+        st.markdown(f"### {school_name}")
+        
+        if school_meal_status.get(school_name, False):
+            school_data = [m for m in all_meals if m["학교명"] == school_name]
+            for row in school_data:
+                st.metric(
+                    label=f"{row['식사 구분']}",
+                    value=f"{row['칼로리(kcal)']} kcal"
+                )
+                st.caption(row["메뉴 요약"])
+        else:
+            # 급식이 없는 학교는 사유 안내
+            st.error("❌ **급식 없음**")
+            st.caption("해당 날짜에는 급식운영 정보가 존재하지 않습니다.")
