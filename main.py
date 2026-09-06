@@ -1,122 +1,147 @@
-import re
+import streamlit as st
 import requests
 import pandas as pd
+import re
+from datetime import datetime
 
-# 1. 설정 및 기본 정보 정의
-# 오픈API 인증키가 있는 경우 'sample' 대신 입력하세요.
-API_KEY = "sample"  
-BASE_URL = "https://open.neis.go.kr/hub/mealServiceDietInfo"
+# --- 페이지 설정 ---
+st.set_page_config(
+    page_title="고교 급식 칼로리 나침반",
+    page_icon="🥗",
+    layout="wide"
+)
 
-# 서울특별시교육청 코드
-OFFICE_CODE = "B10"
+# --- 기본 설정값 ---
+API_URL = "https://open.neis.go.kr/hub/mealServiceDietInfo"
+OFFICE_CODE = "B10"  # 서울특별시교육청 코드
 
-# 분석 대상 학교 정보 (행정표준코드)
+# 대상 학교 정보 (행정표준코드)
 SCHOOLS = {
-    "당곡고등학교": "7010536",
-    "수도여자고등학교": "7010082",
-    "성남고등학교": "7010081"
+    "성남고등학교": "70101930",
+    "당곡고등학교": "7010537",
+    "수도여자고등학교": "7010142"
 }
 
-def fetch_meal_data(office_code, school_code, from_ymd="20260301", to_ymd="20260331"):
-    """
-    나이스 오픈API에서 해당 학교의 급식 정보를 조회합니다.
-    """
+# --- 데이터 로드 함수 ---
+@st.cache_data(ttl=3600)
+def fetch_meal_data(school_code, target_date, api_key="sample"):
+    """나이스 API로부터 특정 학교 및 날짜의 급식 데이터를 가져옵니다."""
     params = {
-        "KEY": API_KEY,
+        "KEY": api_key,
         "Type": "json",
         "pIndex": 1,
         "pSize": 100,
-        "ATPT_OFCDC_SC_CODE": office_code,
+        "ATPT_OFCDC_SC_CODE": OFFICE_CODE,
         "SD_SCHUL_CODE": school_code,
-        "MLSV_FROM_YMD": from_ymd,
-        "MLSV_TO_YMD": to_ymd
+        "MLSV_YMD": target_date
     }
     
     try:
-        response = requests.get(BASE_URL, params=params)
+        response = requests.get(API_URL, params=params, timeout=10)
         data = response.json()
         
-        # 정상 응답 확인
         if "mealServiceDietInfo" in data:
             return data["mealServiceDietInfo"][1]["row"]
-        else:
-            print(f"데이터 없음 또는 에러 발생: {school_code}")
-            return []
+        return []
     except Exception as e:
-        print(f"API 요청 오류 ({school_code}): {e}")
+        st.error(f"데이터 수신 중 오류 발생: {e}")
         return []
 
 def parse_calorie(cal_str):
-    """
-    '725.4 Kcal' 문자열에서 숫자(float)만 추출합니다.
-    """
+    """칼로리 문자열(예: '650.5 Kcal')에서 숫자만 추출합니다."""
     if not cal_str:
         return 0.0
-    match = re.search(r"([0-9]+\.?[0-9]*)", str(cal_str))
-    if match:
-        return float(match.group(1))
-    return 0.0
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", cal_str)
+    return float(match.group(1)) if match else 0.0
 
-def clean_dish_name(dish_str):
-    """
-    메뉴명에서 알레르기 유발물질 번호(예: 1.2.5.)나 특수문자를 제거합니다.
-    """
-    if not dish_str:
+def clean_menu_text(menu_str):
+    """메뉴 이름의 알레르기 원산지 번호 등 불필요한 특수문자를 정제합니다."""
+    if not menu_str:
         return ""
-    # <br/> 태그 변경 및 알레르기 번호 제거
-    cleaned = dish_str.replace("<br/>", ", ")
+    # <br/> 태그를 줄바꿈으로 변경하고 원산지/알레르기 숫자 제거
+    cleaned = menu_str.replace("<br/>", "\n")
     cleaned = re.sub(r"\d+\.", "", cleaned)
     return cleaned.strip()
 
-# 2. 데이터 수집 및 가공
-all_meals = []
+# --- UI 레이아웃 ---
+st.title("🥗 고교 급식 칼로리 비교 & 다이어트 도우미")
+st.caption("성남고, 당곡고, 수도여고의 급식 칼로리를 높은 순/낮은 순으로 비교하여 건강한 식단을 계획해보세요.")
 
-for school_name, school_code in SCHOOLS.items():
-    rows = fetch_meal_data(OFFICE_CODE, school_code)
-    
-    for row in rows:
-        cal_val = parse_calorie(row.get("CAL_INFO", ""))
-        dish_clean = clean_dish_name(row.get("DDISH_NM", ""))
+# 데이터 조회를 위한 사이드바
+st.sidebar.header("🔍 조회 설정")
+selected_date = st.sidebar.date_input("조회할 날짜 선택", datetime.now())
+formatted_date = selected_date.strftime("%Y%m%m") if hasattr(selected_date, "strftime") else selected_date.replace("-", "")
+date_str_formatted = selected_date.strftime("%Y%m%d")
+
+api_key = st.sidebar.text_input("NEIS API Key (미입력 시 sample key 사용)", value="sample")
+
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **Tip**: API 샘플 키는 호출 제한이 있을 수 있으므로 나이스 Open API에서 정식 키를 발급받아 사용하는 것을 권장합니다.")
+
+# --- 메인 처리 ---
+if st.button("급식 데이터 가져오기", type="primary"):
+    all_meals = []
+
+    with st.spinner("학교별 급식 정보를 조회하는 중..."):
+        for school_name, school_code in SCHOOLS.items():
+            rows = fetch_meal_data(school_code, date_str_formatted, api_key)
+            
+            for row in rows:
+                cal_num = parse_calorie(row.get("CAL_INFO", ""))
+                meal_type = row.get("MMEAL_SC_NM", "식사")
+                menu = clean_menu_text(row.get("DDISH_NM", ""))
+                
+                all_meals.append({
+                    "학교명": school_name,
+                    "식사": meal_type,
+                    "칼로리(kcal)": cal_num,
+                    "원본 칼로리": row.get("CAL_INFO", "-"),
+                    "메뉴": menu,
+                    "영양정보": clean_menu_text(row.get("NTR_INFO", "-"))
+                })
+
+    if not all_meals:
+        st.warning(f"{selected_date.strftime('%Y년 %m월 %d일')}의 급식 정보가 없거나 데이터를 가져올 수 없습니다.")
+    else:
+        df = pd.DataFrame(all_meals)
         
-        all_meals.append({
-            "학교명": row.get("SCHUL_NM", school_name),
-            "급식일자": row.get("MLSV_YMD"),
-            "식사명": row.get("MMEAL_SC_NM"),
-            "칼로리(Kcal)": cal_val,
-            "메뉴": dish_clean,
-            "영양정보": row.get("NTR_INFO", "")
-        })
-
-# 3. 데이터프레임 생성 및 칼로리 내림차순 정렬
-df = pd.DataFrame(all_meals)
-
-if not df.empty:
-    # 칼로리 기준 내림차순 정렬 (높은 칼로리 -> 낮은 칼로리)
-    df_sorted = df.sort_values(by="칼로리(Kcal)", ascending=False).reset_index(drop=True)
-    
-    print("=" * 60)
-    print("🔥 [고칼로리 -> 저칼로리] 급식 순위 TOP 5")
-    print("=" * 60)
-    for idx, row in df_sorted.head(5).iterrows():
-        print(f"[{idx+1}위] {row['학교명']} ({row['급식일자']} {row['식사명']}) - {row['칼로리(Kcal)']} Kcal")
-        print(f"   메뉴: {row['메뉴'][:50]}...\n")
-
-    print("=" * 60)
-    print("🥗 [다이어트 추천!] 저칼로리 급식 TOP 5")
-    print("=" * 60)
-    for idx, row in df_sorted.tail(5).iloc[::-1].reset_index(drop=True).iterrows():
-        print(f"[{idx+1}위] {row['학교명']} ({row['급식일자']} {row['식사명']}) - {row['칼로리(Kcal)']} Kcal")
-        print(f"   메뉴: {row['메뉴'][:50]}...\n")
-
-    print("=" * 60)
-    print("🏫 학교별 평균 칼로리 비교")
-    print("=" * 60)
-    avg_cal = df.groupby("학교명")["칼로리(Kcal)"].mean().reset_index()
-    for _, row in avg_cal.iterrows():
-        print(f"- {row['학교명']}: 평균 {row['칼로리(Kcal)']:.1f} Kcal")
+        # 칼로리 내림차순 정렬 (높은 순 -> 낮은 순)
+        df_sorted = df.sort_values(by="칼로리(kcal)", ascending=False).reset_index(drop=True)
         
-    # 결과를 CSV 파일로 저장 (깃허브 업로드용)
-    df_sorted.to_csv("school_meal_calories.csv", index=False, encoding="utf-8-sig")
-    print("\n분석 결과가 'school_meal_calories.csv' 파일로 저장되었습니다.")
-else:
-    print("조회된 급식 데이터가 없습니다.")
+        st.subheader(f"📅 {selected_date.strftime('%Y-%m-%d')} 급식 칼로리 순위")
+        
+        # 메트릭 카드로 최고/최저 강조
+        col1, col2 = st.columns(2)
+        with col1:
+            max_meal = df_sorted.iloc[0]
+            st.metric(
+                label="🔥 최고 칼로리 급식",
+                value=f"{max_meal['칼로리(kcal)']} kcal",
+                delta=f"{max_meal['학교명']} ({max_meal['식사']})"
+            )
+        with col2:
+            min_meal = df_sorted.iloc[-1]
+            st.metric(
+                label="🥗 최저 칼로리 급식",
+                value=f"{min_meal['칼로리(kcal)']} kcal",
+                delta=f"{min_meal['학교명']} ({min_meal['식사']})",
+                delta_color="normal"
+            )
+
+        st.markdown("---")
+        
+        # 정렬된 표 출력
+        st.dataframe(
+            df_sorted[["학교명", "식사", "칼로리(kcal)", "메뉴"]],
+            use_container_width=True,
+            height=250
+        )
+        
+        # 세부 정보 확인 (선택)
+        st.subheader("📌 상세 메뉴 및 영양 정보")
+        for idx, row in df_sorted.iterrows():
+            with st.expander(f"[{idx+1}위] {row['학교명']} - {row['식사']} ({row['칼로리(kcal)']} kcal)"):
+                st.write("**[식단 메뉴]**")
+                st.text(row["메뉴"])
+                st.write("**[영양 성분 정보]**")
+                st.text(row["영양정보"])
